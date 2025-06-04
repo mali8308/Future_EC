@@ -1,0 +1,657 @@
+
+
+
+```{r}
+
+suppressPackageStartupMessages({
+library(survival)
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(doParallel)
+library(glmnet)
+library(caret)
+library(ggsurvfit)
+library(survminer)
+library(survcompare)
+library(limma)
+library(matrixStats)
+library(caret)
+library(ranger)
+library(pROC)
+library(destiny)
+})
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  #library(GSEABase)
+  library(org.Hs.eg.db)
+  library(clusterProfiler)
+  #library(GOstats)
+  library(GO.db)
+  #library(Category)
+  #library(topGO)
+  library(ggplot2)
+  library(randomForest)
+  #library(msigdbr)
+  library(fgsea)
+  library(AnnotationDbi)
+  library(glmnet)
+  library(DESeq2)
+  library(enrichplot)
+  #library(pathview)
+  library(DOSE)
+  library(biomaRt)
+  library(dplyr)
+  #library(ReactomePA)
+  library(igraph)
+  library(ggraph)
+  #library(STRINGdb)
+  library(reshape2)
+  #library(ComplexHeatmap)
+})
+
+
+
+```
+
+
+```{r}
+
+GSE89093_metadata = read.csv("/Users/ali/Desktop/NYU/4th Semester/Advanced Integrative Omics/Metadata_Cleaned/GSE89093_metadata.csv")
+
+GSE89093_metadata$Future_EC = as.numeric(gsub(".*: ", "", GSE89093_metadata$Diagnosis_minus_Sampling_Age))
+
+GSE89093_metadata$Condition = as.factor(GSE89093_metadata$Condition)
+
+GSE89093_metadata$Condition = relevel(GSE89093_metadata$Condition, ref = "healthy")
+
+GSE89093_betas = fread("/scratch/ma8308/EC_Prediction/GSE89093/GSE89093_betas.csv", 
+                       nThread = 14)
+
+GSE89093_betas = na.omit(GSE89093_betas)
+
+GSE89093_betas_t = column_to_rownames(GSE89093_betas, var = "V1")
+
+GSE89093_betas_t = as.data.frame(t(GSE89093_betas_t))
+
+GSE89093_betas_t = GSE89093_betas_t[GSE89093_metadata$geo_accession,]
+
+HM450_manifest = fread("/scratch/ma8308/EC_Prediction/GSE263434/GPL21145_MethylationEPIC_15073387_v-1-0.csv.gz", skip =7, nThread = 14)
+
+```
+
+**For future cancer prediction**
+
+```{r}
+
+future_ec_metadata = GSE89093_metadata[GSE89093_metadata$Future_EC > 0,]
+#future_ec_metadata = GSE89093_metadata
+future_ec_metadata$Condition = as.numeric(future_ec_metadata$Condition)-1
+
+```
+
+
+## Horvath's Coefficients
+
+```{r}
+
+horvaths_clock = read.csv("/scratch/ma8308/EC_Prediction/13059_2013_3156_MOESM3_ESM.csv", skip = 2)
+
+horvath_cpgs = GSE89093_betas_t[, horvaths_clock$CpGmarker[-1]]
+
+epi_age = as.matrix(horvath_cpgs) %*% as.matrix(horvaths_clock$CoefficientTraining[-1])
+
+epi_age = epi_age[future_ec_metadata$geo_accession,]
+
+future_ec_metadata$Predicted_Age = epi_age
+# Create the boxplot
+ggplot(future_ec_metadata, aes(x = as.factor(Condition), y = Predicted_Age, fill = as.factor(Condition))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), 
+              alpha = 0.5, size = 1) +
+  labs(title = "Future EC and Predicted Age by Condition",
+       x = "Condition", y = "Value") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())+
+  scale_fill_brewer(palette = "Set2")
+
+
+
+```
+
+```{r}
+# install.packages("ggsignif")
+library(ggplot2)
+library(ggsignif)
+
+ggplot(future_ec_metadata, 
+       aes(x = as.factor(Condition), y = Predicted_Age, fill = as.factor(Condition))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(0.2, 0.8), alpha = 0.5, size = 1) +
+  geom_signif(
+    comparisons = list(c("0", "1")),      # replace "A","B" with your actual factor levels
+    map_signif_level = TRUE,              # turns p-values into "*","**", etc.
+    test = "wilcox.test",                      # or "wilcox.test"
+    textsize = 3.5,                         # adjust font size of the asterisk
+    tip_length = 0.03                     # length of the little ticks at box edges
+  ) +
+  labs(title = "Future EC and Predicted Age by Condition",
+       x = "Condition", y = "Predicted Age") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+
+```
+
+
+## PhenoAge
+
+Phenoage correlates significantly with future EC diagnosis
+
+```{r}
+
+phenoage_coefficients = read.csv("/scratch/ma8308/EC_Prediction/aging-10-101414-s002.csv")
+
+phenoage_cpgs = GSE89093_betas_t[, colnames(GSE89093_betas_t) %in% phenoage_coefficients$CpG[-1]]
+
+phenoage_coefficients_inc = phenoage_coefficients[phenoage_coefficients$CpG %in% colnames(phenoage_cpgs),]
+
+phenoage = as.matrix(phenoage_cpgs) %*% as.matrix(phenoage_coefficients_inc$Weight) + phenoage_coefficients$Weight[1]
+
+phenoage = phenoage[future_ec_metadata$geo_accession,]
+
+future_ec_metadata$PhenoAge = phenoage
+
+cor.test(future_ec_metadata$PhenoAge, future_ec_metadata$Age)
+cor.test(future_ec_metadata$PhenoAge, future_ec_metadata$Future_EC)
+cor.test(future_ec_metadata$Age, future_ec_metadata$Future_EC)
+
+# Create the boxplot
+ggplot(future_ec_metadata, aes(x = as.factor(Condition), y = PhenoAge, fill = as.factor(Condition))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), 
+              alpha = 0.5, size = 1) +
+  labs(title = "Future EC and Predicted Age by Condition", fill = "Cancer Diagnosis",
+       x = "Condition", y = "Value") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())+
+  scale_fill_brewer(palette = "Set2")
+
+
+ggplot(future_ec_metadata, aes(x = PhenoAge, y = Future_EC, color = as.factor(Condition))) +
+  geom_point() +  # Scatter plot without shape marks
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +  
+  geom_smooth(method = "glm", se = TRUE, color = "orange") +  
+  labs(color = "Cancer Diagnosis", 
+       title = "PhenoAge",
+       color = "Condition")+
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+
+```
+
+```{r}
+ggplot(future_ec_metadata, 
+       aes(x = as.factor(Condition), y = PhenoAge, fill = as.factor(Condition))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(0.2, 0.8), alpha = 0.5, size = 1) +
+  geom_signif(
+    comparisons = list(c("0", "1")),      # replace "A","B" with your actual factor levels
+    map_signif_level = TRUE,              # turns p-values into "*","**", etc.
+    test = "wilcox.test",                      # or "wilcox.test"
+    textsize = 3.5,                         # adjust font size of the asterisk
+    tip_length = 0.03                     # length of the little ticks at box edges
+  ) +
+  labs(title = "Future EC and Predicted Age by Condition", fill = "Cancer Diagnosis",
+       x = "Condition", y = "Predicted Age") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+
+```
+
+
+
+```{r}
+
+individual_cpg_correlation = data.frame(CpG = 1:ncol(phenoage_cpgs),
+                                        Correlation = 1:ncol(phenoage_cpgs),
+                                        P_Value = 1:ncol(phenoage_cpgs))
+
+for (i in 1:ncol(phenoage_cpgs))
+{
+ 
+  individual_cpg_correlation$CpG[i] = colnames(phenoage_cpgs)[i]
+  
+  individual_cpg_correlation$Correlation[i] = unlist(cor.test(phenoage_cpgs[future_ec_metadata$geo_accession,i],
+                                                              future_ec_metadata$Future_EC)[4])
+  
+  individual_cpg_correlation$P_Value[i] = unlist(cor.test(phenoage_cpgs[future_ec_metadata$geo_accession,i],
+                                                          future_ec_metadata$Future_EC)[3])
+   
+}
+
+individual_cpg_correlation$Adjusted_P_Value = p.adjust(individual_cpg_correlation$P_Value, method = "fdr")
+
+significant_phenoage = individual_cpg_correlation[individual_cpg_correlation$P_Value < 0.05,]
+
+significant_phenoage
+
+```
+
+
+```{r}
+# make sure you have these loaded
+library(survival)
+library(glmnet)
+library(survminer)
+library(dplyr)
+
+# ---- 1. Prepare X (methylation) and y (Surv object) ----
+
+# assume `significant_phenoage` is a data.frame with
+#   rows = sample GEO accessions, cols = 146 CpG probes
+# and that rownames(significant_phenoage) match future_ec_metadata$geo_accession
+
+X = na.omit(as.matrix(phenoage_cpgs[future_ec_metadata$geo_accession, significant_phenoage$CpG]))
+y = Surv(time = future_ec_metadata$Future_EC,
+         event = future_ec_metadata$Condition)
+
+# ---- 2. Fit LASSO‐Cox (glmnet) ----
+
+set.seed(42)
+cvfit = cv.glmnet(x = X, y = y,
+                  family = "cox",
+                  alpha = 0.5,         # LASSO penalty
+                  nfolds = 10)
+
+# plot cross‐validated deviance vs log(lambda)
+#plot(cvfit)
+
+# extract nonzero coefficients at the optimal λ
+coef_min  = coef(cvfit, s = "lambda.1se")
+sel_idx   = which(coef_min != 0)
+sel_probes = rownames(coef_min)[sel_idx]
+sel_coefs  = as.numeric(coef_min[sel_idx])
+
+cat("Number of CpGs selected by LASSO:", length(sel_probes), "\n")
+future_ec_probes = data.frame(probe = sel_probes, coef = sel_coefs)
+
+# ---- 3. Compute per‐sample risk score and dichotomize ----
+
+risk_score = predict(cvfit, newx = X, s = "lambda.1se", type = "link")
+future_ec_metadata$risk_score = as.numeric(risk_score)
+
+# split at the median into High vs Low risk
+future_ec_metadata = future_ec_metadata %>%
+  mutate(risk_group = ifelse(risk_score >= median(risk_score),
+                             "High","Low"))
+
+# ---- 4. Kaplan–Meier by risk group ----
+
+km_fit = survfit(Surv(time = Future_EC, 
+                      event = Condition) ~ risk_group,
+                 data = future_ec_metadata)
+
+ggsurvplot(km_fit,
+           data        = future_ec_metadata,
+           risk.table  = TRUE,
+           pval        = TRUE,
+           legend.title= "Methylation risk",
+           legend.labs = c("High risk","Low risk"),
+           title       = "EC‐free survival by methylation‐based risk",
+           xlab        = "Time to EC (Years)",
+           ylab        = "Survival probability")
+
+# ---- 5. Forest plot of selected CpGs ----
+```
+
+
+```{r}
+# If only a handful were selected, you can fit a standard Cox on them:
+if(length(sel_probes) <= 20) {
+  # build formula
+  frm = as.formula(paste0("Surv(Future_EC,Condition) ~ ",
+                           paste(sel_probes, collapse = " + ")))
+  cox_sel = coxph(frm, data = cbind(future_ec_metadata, phenoage_cpgs[future_ec_metadata$geo_accession,]))
+  
+  # draw forest
+  ggforest(cox_sel,
+           data = cbind(future_ec_metadata, phenoage_cpgs[future_ec_metadata$geo_accession,]),
+           main = "Hazard ratios for selected CpGs")
+} else {
+  message("Too many CpGs for an unpenalized Cox forest; consider plotting only top 10 by |coef|.")
+}
+
+```
+
+```{r}
+# install.packages("broom")    # if you don’t already have it
+library(broom)
+library(ggplot2)
+library(dplyr)
+
+# 1. Re‐fit (or reuse) your Cox model on the selected CpGs:
+#    Here I assume you already did:
+#     frm  <- Surv(Future_EC, Condition) ~ cg1 + cg2 + … + cg15
+#     cox_sel <- coxph(frm, data = cbind(future_ec_metadata, phenoage_cpgs))
+
+# 2. Tidy up and get HR + 95% CI
+hr_df <- broom::tidy(cox_sel, exponentiate = TRUE, conf.int = TRUE) %>%
+  # drop the intercept if present
+  filter(term != "(Intercept)") %>%
+  # for nicer labels, you can rename term → probe
+  rename(probe = term,
+         HR    = estimate,
+         lower = conf.low,
+         upper = conf.high,
+         p     = p.value)
+
+# 3. Re‐order probes by HR for plotting
+hr_df = hr_df %>%
+  arrange(HR) %>%
+  mutate(probe = factor(probe, levels = probe))
+
+# 3) compute a y‐position just above the topmost point for our annotations
+#ymax = length(hr_df$probe) + 0.5
+
+# 4) build the plot
+ggplot(hr_df, aes(x = scale(HR, center = T), y = probe)) +
+  geom_point(size = 2) +
+  #geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.5) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  labs(
+    x = "Hazard ratio (95% CI)",
+    y = NULL,
+    title = "Individual CpG hazards")+
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+```
+
+
+
+```{r}
+set.seed(1010)
+
+dm = DiffusionMap((phenoage_cpgs[future_ec_metadata$geo_accession, significant_phenoage$CpG]), 
+                  n_eigs = 2, 
+                  rotate = TRUE, 
+                  verbose = TRUE,
+                  distance = "cosine")
+
+dpt = DPT(dm)
+
+dm_df = as.data.frame(dm) |> 
+  dplyr::select(DC1, DC2) |>
+  mutate(DPT = dpt$dpt)
+
+
+diffusion_data = cbind(future_ec_metadata, dm_df)
+
+ggplot(diffusion_data, 
+       aes(x = DC1, y = DC2, color = as.factor(Condition), label = as.factor(Condition))) +
+  geom_point(size = 2) +
+  #geom_text_repel(size = 3, box.padding = 0.3, point.padding = 0.2, max.overlaps = 15) +
+  labs(title = "Diffusion Map of Cell Types") +
+    theme_classic() + 
+  theme(aspect.ratio = 0.7, axis.ticks = element_blank())
+
+#ggsave("/scratch/ma8308/Li_Lab/ChIP_seq/figures/Diffusion.png", 
+ #      width = 9, height = 7, units = "in", dpi = 500, bg = "white")
+
+```
+
+```{r}
+
+ggplot(diffusion_data, 
+       aes(x = DC1, y = DC2, color = DPT, shape = as.factor(Condition))) +
+  geom_point(size = 2) +
+  #geom_text_repel(size = 3, box.padding = 0.3, point.padding = 0.2, max.overlaps = 15) +
+  labs(title = "Diffusion Map of Cell Types") +
+  scale_color_distiller(palette = "RdYlBu") +
+    theme_classic() + 
+  theme(aspect.ratio = 0.7, axis.ticks = element_blank())
+
+
+```
+
+
+
+```{r}
+
+future_methylation_data = phenoage_cpgs[future_ec_metadata$geo_accession, significant_phenoage$CpG]
+
+data.prcomp = prcomp((future_methylation_data), scale=TRUE, center=T)
+
+coords2draw = as.data.frame(data.prcomp$x)
+coords2draw = cbind(coords2draw, future_ec_metadata)
+
+ggplot(coords2draw) +
+  geom_point(mapping=aes(x = PC1, y= PC2, 
+                         col=as.factor(Condition)))+
+  ggtitle(paste("(A) PCA of the training set (n = 236) using the ageprint."))+
+  theme_classic() + 
+  theme(aspect.ratio = 0.7, axis.ticks = element_blank())
+
+```
+
+```{r}
+umap_results = uwot::umap(((future_methylation_data)), 
+                          n_neighbors = 2, 
+                          min_dist = 0.0001, 
+                          metric = "manhattan",
+                          learning_rate = 0.001,
+                          n_trees = 10000,
+                          n_threads = 7,
+                          repulsion_strength = 1.1)
+
+# Convert the UMAP result to a data frame and name the columns
+umap_df = as.data.frame(umap_results)
+
+colnames(umap_df) = c("UMAP1", "UMAP2")
+
+# Combine the UMAP coordinates with your metadata
+umap_df = cbind(umap_df, future_ec_metadata)
+
+# Plot UMAP results with ggplot2
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = as.factor(Condition), label = Condition)) +
+  geom_point(size = 2, alpha = 0.8) +
+  #geom_text_repel(size = 3, box.padding = 0.3, point.padding = 0.2, max.overlaps = 15) +
+  ggtitle("UMAP of the ChIP-seq Reads") +
+  theme_classic() +
+  theme(aspect.ratio = 0.7, axis.ticks = element_blank())
+
+```
+
+```{r}
+
+significant_genes = HM450_manifest[HM450_manifest$IlmnID %in% future_ec_probes$probe,]
+
+HM450_universe = unique(unlist(strsplit(HM450_manifest$UCSC_RefGene_Name, ";")))
+
+probe_genes = unique(unlist(strsplit(significant_genes$UCSC_RefGene_Name, ";")))
+
+
+GO_enrichment_decrease = enrichGO(gene = probe_genes,
+                         OrgDb = "org.Hs.eg.db",
+                         keyType = "SYMBOL",
+                         pvalueCutoff = 0.05,
+                         pAdjustMethod = "fdr",
+                         universe = HM450_universe,
+                         qvalueCutoff = 0.05,
+                         ont = "ALL")
+
+
+plot(barplot(GO_enrichment_decrease, showCategory = 16))
+
+as.data.frame(GO_enrichment_decrease)
+
+```
+
+```{r}
+
+probe_genes_ENTREZ = (mapIds(org.Hs.eg.db, keys = probe_genes, 
+                             column = "ENTREZID", keytype = "SYMBOL"))
+
+
+HM450_universe_ENTREZ = (mapIds(org.Hs.eg.db, keys = HM450_universe, 
+                             column = "ENTREZID", keytype = "SYMBOL"))
+
+reactome_enrichment = ReactomePA::enrichPathway(gene = probe_genes_ENTREZ,
+                                    organism = "human",
+                                    universe = HM450_universe_ENTREZ,
+                                    pvalueCutoff = 0.05,
+                                    pAdjustMethod = "BH",
+                                    qvalueCutoff = 0.05,
+                                    readable = TRUE)
+
+as.data.frame(reactome_enrichment)
+
+```
+
+
+```{r}
+
+ggo = groupGO(gene     = probe_genes,
+               OrgDb    = org.Hs.eg.db,
+               ont      = "MF",
+               level    = 5,
+               readable = TRUE,
+              keyType = "SYMBOL")
+
+ggo_dataframe = as.data.frame(ggo)
+
+ggo_dataframe = ggo_dataframe[ggo_dataframe$Count>1,]
+
+ggo_dataframe
+
+# Load necessary library
+library(ggplot2)
+
+# Load necessary libraries
+library(ggplot2)
+library(viridis)  # For the color palette
+
+# Assuming your dataframe is named df
+ggplot(ggo_dataframe, aes(x = Count, y = Description, fill = Count)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_c(option = "viridis") +  # Apply the viridis color palette
+  labs(title = "GO Term Descriptions vs Counts", x = "Count", y = "GO Term Descriptions") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+
+
+```
+
+```{r}
+
+write.csv(probe_genes, "/scratch/ma8308/EC_Prediction/probe_genes.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+
+all_samples = read.csv("/scratch/ma8308/EC_Prediction/Metadata_Cleaned/EC_Methylation_Metadata_All_Samples.csv")
+
+all_samples$days_to_diagnosis = as.numeric(all_samples$days_to_diagnosis)
+
+TCGA_future_EC = unique(all_samples$Accession[all_samples$days_to_diagnosis>0])[-1]
+
+future_EC_metadata_TCGA = na.omit(all_samples[all_samples$Accession %in% TCGA_future_EC, c("Accession", "Age",
+                                                                                           "Age_at_diagnosis",
+                                                                                           "days_to_death",
+                                                                                           "days_to_diagnosis")])
+
+future_EC_metadata_TCGA = future_EC_metadata_TCGA[future_EC_metadata_TCGA$days_to_diagnosis > 0,]
+
+future_unique = future_EC_metadata_TCGA[!duplicated(future_EC_metadata_TCGA$Accession),]
+
+row.names(future_unique) = future_unique$Accession
+
+
+TCGA_methlyation = data.table::fread("/scratch/ma8308/EC_Prediction/TCGA-UCEC_Methylation/TCGA-UCEC_Methylation_Data.csv",
+                                     nThread = 7)
+
+TCGA_methlyation = column_to_rownames(TCGA_methlyation, "V1")
+
+TCGA_methlyation_phenoage = as.data.frame((TCGA_methlyation[phenoage_coefficients$CpG[-1], 
+                                                            colnames(TCGA_methlyation) %in%
+                                                              row.names(future_unique)]))
+
+
+TCGA_methlyation_phenoage_imputed <- TCGA_methlyation_phenoage #%>%
+  #mutate(across(
+   # where(is.numeric),                        # or across(everything()) if all columns are numeric
+    #~ replace(., is.na(.), mean(., na.rm=TRUE))))
+
+TCGA_methlyation_phenoage_imputed = as.data.frame((t(na.omit(TCGA_methlyation_phenoage_imputed))))
+
+#TCGA_methlyation_phenoage = TCGA_methlyation_phenoage[,row.names(future_unique)]
+
+future_unique = future_unique[future_unique$Accession %in% colnames(TCGA_methlyation_phenoage),]
+
+```
+
+
+```{r}
+
+phenoage_cpgs_TCGA = TCGA_methlyation_phenoage_imputed[, colnames(TCGA_methlyation_phenoage_imputed) %in%
+                                                         phenoage_coefficients$CpG[-1]]
+
+phenoage_coefficients_inc = phenoage_coefficients[phenoage_coefficients$CpG %in% colnames(phenoage_cpgs_TCGA),]
+
+phenoage = as.data.frame(as.matrix(phenoage_cpgs_TCGA) %*% as.matrix(phenoage_coefficients_inc$Weight) 
+                         + phenoage_coefficients$Weight[1])
+
+colnames(phenoage) = "PhenoAge"
+phenoage$Accession = row.names(phenoage)
+
+
+phenoage
+
+phenoage_TCGA_future = inner_join(phenoage, future_EC_metadata_TCGA, join_by("Accession" == "Accession"))
+
+phenoage_TCGA_future = phenoage_TCGA_future[!duplicated(phenoage_TCGA_future$Accession),]
+
+phenoage_TCGA_future$Future_EC = phenoage_TCGA_future$days_to_diagnosis/365
+
+phenoage_TCGA_future$Age = as.numeric(phenoage_TCGA_future$Age)
+
+cor.test(phenoage_TCGA_future$PhenoAge, phenoage_TCGA_future$Age)
+cor.test(phenoage_TCGA_future$PhenoAge, phenoage_TCGA_future$Future_EC)
+cor.test(phenoage_TCGA_future$Age, phenoage_TCGA_future$Future_EC)
+```
+
+
+```{r}
+# Create the boxplot
+
+ggplot(future_ec_metadata, aes(x = as.factor(Condition), y = PhenoAge, fill = as.factor(Condition))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(0.8)) +
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), 
+              alpha = 0.5, size = 1) +
+  labs(title = "Future EC and Predicted Age by Condition", fill = "Cancer Diagnosis",
+       x = "Condition", y = "Value") +
+  theme_classic() +
+  theme(axis.ticks = element_blank())+
+  scale_fill_brewer(palette = "Set2")
+
+
+ggplot(future_ec_metadata, aes(x = PhenoAge, y = Future_EC, color = as.factor(Condition))) +
+  geom_point() +  # Scatter plot without shape marks
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted", color = "black") +  
+  geom_smooth(method = "glm", se = TRUE, color = "orange") +  
+  labs(color = "Cancer Diagnosis", 
+       title = "PhenoAge",
+       color = "Condition")+
+  theme_classic() +
+  theme(axis.ticks = element_blank())
+
+
+```
+
+
+
+

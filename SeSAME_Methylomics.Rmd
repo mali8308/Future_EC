@@ -1,0 +1,126 @@
+
+
+## Loading the libraries
+
+```{r}
+
+suppressPackageStartupMessages({
+library(sesame)
+library(parallel)
+library(glmnet)
+})
+
+#sesameDataCache() #Needs to be done once every installation/update of the SeSAME package
+
+```
+
+## Automatic pipeline (openSesame)
+
+### Loading in the data
+
+```{r}
+
+data_dir = "/Users/ali/Downloads/GSE263434_RAW/"
+
+sig_DFs_prepped = openSesame(data_dir, 
+                             func = getBetas,
+                             prep = "QCDPB",
+                             BPPARAM = BiocParallel::MulticoreParam(6))
+
+
+pvals = openSesame(data_dir, 
+                   func = pOOBAH, 
+                   return.pval=TRUE)
+```
+
+### Quality control 
+
+```{r}
+
+qcs = openSesame(data_dir, prep="", func=sesameQC_calcStats)
+
+all_samples_QC = (do.call(rbind, lapply(qcs, as.data.frame))) #Combining all QC metrics from different samples into one dataframe. 
+
+head(all_samples_QC)
+
+comparison_with_public_databases = lapply(qcs, sesameQC_rankStats, platform="EPIC") #Apparently this measures it against public databases.
+
+
+#-------------------------------------------------------------------------------
+
+#Plots - ONLY run if NECESSARY! (prints out an INDIVIDUAL PLOT for EACH SAMPLE)
+
+#sig_DFs = openSesame(data_dir, 
+#                     func = NULL, #Using null gives us SigDF instead. 
+#                     BPPARAM = BiocParallel::MulticoreParam(6))
+
+
+#lapply(sig_DFs, sesameQC_plotRedGrnQQ)
+
+#lapply(sig_DFs, sesameQC_plotIntensVsBetas)
+
+
+```
+
+### Removing masked CpGs
+
+```{r}
+
+masked_cpgs_omitted = t(na.omit(sig_DFs_prepped))
+
+print(paste0("Percentage of CpGs retained: ", round(dim(masked_cpgs_omitted)[1]/dim(sig_DFs_prepped)[1]*100, digits = 2),"%"))
+
+```
+
+### Creating metadata
+
+```{r}
+
+meta_data = data.frame(row.names = names(searchIDATprefixes(data_dir)),
+                       Disease = factor(c("HGSC", "HGSC", "EndoG3"))) 
+
+meta_data$Disease = as.numeric(meta_data$Disease) - 1  # Convert to numeric (0, 1)
+
+```
+
+
+```{r}
+
+methylation_model = cv.glmnet(x = masked_cpgs_omitted, y = meta_data$Disease, 
+                              type.measure="auc",
+                              alpha=0.5, family="binomial",
+                              nfolds = 10)
+
+#-------------------------------------------------------------------------------
+
+train_predict = predict(alpha0.fit, s=alpha0.fit$lambda.1se, newx=train_data_genes)
+
+print(paste("The MAE is:", mean(abs(train_data_ages - train_predict))))
+
+predicting_itself = as.data.frame(train_predict)
+
+predicting_itself = data.frame(Predicted_Age = predicting_itself$s1, 
+                              Real_Age = train_data_ages,
+                              row.names = row.names(predicting_itself))
+
+```
+
+
+
+## Manual Pipeline
+
+```{r}
+
+# Searching and reading IDAT pairs
+
+IDAT_prefixes = searchIDATprefixes(data_dir)
+
+IDAT_pairs = mclapply(IDAT_prefixes, readIDATpair, mc.cores=2)
+
+beta_values = mclapply(IDAT_pairs, getBetas, mc.cores=2)
+
+p_values = mclapply(IDAT_pairs, pOOBAH, mc.cores=2)
+
+
+```
+
